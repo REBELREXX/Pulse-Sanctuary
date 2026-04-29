@@ -194,6 +194,9 @@ export default function App() {
     setFavoriteIds(next);
   };
   const [showSyncOverlay, setShowSyncOverlay] = useState(false);
+  const [showCreatePlaylistModal, setShowCreatePlaylistModal] = useState(false);
+  const [newPlaylistName, setNewPlaylistName] = useState("");
+  const [songToAddToPlaylist, setSongToAddToPlaylist] = useState<Song | null>(null);
   const [isTaskRunning, setIsTaskRunning] = useState(false);
   const [syncError, setSyncError] = useState('');
   const [spotifyUrl, setSpotifyUrl] = useState('');
@@ -466,6 +469,16 @@ export default function App() {
                                     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill={favoriteIds.has(song.id) ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>
                                   </button>
                                   <span className="text-xs text-white/30 font-mono w-12 text-right">--:--</span>
+                                  <button 
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setSongToAddToPlaylist(song);
+                                    }}
+                                    className="p-2 opacity-0 group-hover:opacity-100 transition-opacity hover:text-[#1DB954]"
+                                    title="Add to Playlist"
+                                  >
+                                    <ListMusic className="w-5 h-5 opacity-60 group-hover:opacity-100" />
+                                  </button>
                                   <button className="p-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                     <MoreHorizontal className="w-5 h-5 opacity-40" />
                                   </button>
@@ -578,20 +591,7 @@ export default function App() {
                     <span>Spotify Sync</span>
                   </button>
                   <button 
-                    onClick={() => {
-                      const name = window.prompt("Enter playlist name:");
-                      if (name && name.trim()) {
-                        const newPlaylist = {
-                          id: Math.random().toString(36).substr(2, 9),
-                          name: name.trim(),
-                          songIds: [],
-                          coverArt: generateProceduralArt(name),
-                          createdAt: Date.now()
-                        };
-                        setPlaylists(prev => [...prev, newPlaylist]);
-                        setSelectedPlaylistId(newPlaylist.id);
-                      }
-                    }}
+                    onClick={() => setShowCreatePlaylistModal(true)}
                     className="flex-1 sm:flex-none px-6 py-3 bg-white/5 hover:bg-white/10 rounded-full text-xs font-bold uppercase tracking-widest transition-all border border-white/10 flex items-center justify-center active:scale-95"
                   >
                     New List
@@ -799,6 +799,139 @@ export default function App() {
            </motion.div>
         </div>
       )}
+
+      {/* Create Playlist Modal */}
+      <AnimatePresence>
+        {showCreatePlaylistModal && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowCreatePlaylistModal(false)}
+              className="absolute inset-0 bg-black/80 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="relative bg-[#1A1A1A] border border-white/10 rounded-3xl p-8 w-full max-w-md shadow-2xl"
+            >
+              <h3 className="text-2xl font-bold mb-6">New Playlist</h3>
+              <input 
+                autoFocus
+                type="text"
+                placeholder="Playlist name..."
+                value={newPlaylistName}
+                onChange={(e) => setNewPlaylistName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && newPlaylistName.trim()) {
+                    const newPlaylist = {
+                      id: Math.random().toString(36).substr(2, 9),
+                      name: newPlaylistName.trim(),
+                      songIds: [],
+                      coverArt: generateProceduralArt(newPlaylistName),
+                      createdAt: Date.now()
+                    };
+                    setPlaylists(prev => [...prev, newPlaylist]);
+                    setSelectedPlaylistId(newPlaylist.id);
+                    setNewPlaylistName("");
+                    setShowCreatePlaylistModal(false);
+                  }
+                }}
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-white/20 focus:outline-none focus:border-[#1DB954] transition-colors mb-6"
+              />
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => setShowCreatePlaylistModal(false)}
+                  className="flex-1 py-3 rounded-full font-bold bg-white/5 hover:bg-white/10 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button 
+                  disabled={!newPlaylistName.trim()}
+                  onClick={() => {
+                    const newPlaylist = {
+                      id: Math.random().toString(36).substr(2, 9),
+                      name: newPlaylistName.trim(),
+                      songIds: [],
+                      coverArt: generateProceduralArt(newPlaylistName),
+                      createdAt: Date.now()
+                    };
+                    setPlaylists(prev => [...prev, newPlaylist]);
+                    setSelectedPlaylistId(newPlaylist.id);
+                    setNewPlaylistName("");
+                    setShowCreatePlaylistModal(false);
+                  }}
+                  className="flex-1 py-3 rounded-full font-bold bg-[#1DB954] hover:bg-[#1ed760] text-black transition-colors disabled:opacity-50"
+                >
+                  Create
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Add To Playlist Selector */}
+      <AnimatePresence>
+        {songToAddToPlaylist && (
+          <div className="fixed inset-0 z-[111] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setSongToAddToPlaylist(null)}
+              className="absolute inset-0 bg-black/80 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: 20, opacity: 0 }}
+              className="relative bg-[#1A1A1A] border border-white/10 rounded-3xl p-6 w-full max-w-sm shadow-2xl overflow-hidden"
+            >
+              <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+                <Plus className="w-5 h-5 text-[#1DB954]" />
+                Add to Playlist
+              </h3>
+              <div className="max-h-[300px] overflow-y-auto pr-2 space-y-2 no-scrollbar">
+                {playlists.length > 0 ? playlists.map(playlist => (
+                  <button
+                    key={playlist.id}
+                    onClick={() => {
+                      if (!playlist.songIds.includes(songToAddToPlaylist.id)) {
+                        setPlaylists(prev => prev.map(p => 
+                          p.id === playlist.id 
+                            ? { ...p, songIds: [...p.songIds, songToAddToPlaylist.id] }
+                            : p
+                        ));
+                      }
+                      setSongToAddToPlaylist(null);
+                    }}
+                    className="w-full flex items-center gap-4 p-3 rounded-xl hover:bg-white/5 transition-colors group text-left"
+                  >
+                    <div className="w-12 h-12 rounded-lg bg-white/5 flex-shrink-0">
+                      <img src={playlist.coverArt} className="w-full h-full object-cover rounded-lg" alt="" />
+                    </div>
+                    <div>
+                      <div className="font-medium group-hover:text-[#1DB954] transition-colors">{playlist.name}</div>
+                      <div className="text-xs text-white/40">{playlist.songIds.length} songs</div>
+                    </div>
+                  </button>
+                )) : (
+                  <p className="text-sm text-white/40 text-center py-8 italic">No playlists created yet.</p>
+                )}
+              </div>
+              <button 
+                onClick={() => setSongToAddToPlaylist(null)}
+                className="w-full mt-6 py-3 rounded-full font-bold bg-white/5 hover:bg-white/10 transition-colors"
+              >
+                Close
+              </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Spotify Sync Overlay */}
       {showSyncOverlay && (

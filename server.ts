@@ -8,13 +8,9 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import axios from "axios";
 import dotenv from "dotenv";
-// @ts-ignore
 import youtube from "youtube-search-api";
-import { GoogleGenAI, Type } from "@google/genai";
 
 dotenv.config();
-
-const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
 async function startServer() {
   const app = express();
@@ -253,46 +249,6 @@ async function startServer() {
             tracks: { items: tracks }
           };
           console.log(`Extracted ${tracks.length} tracks via Regex/Meta fallback`);
-        }
-      }
-
-      // Final Strategy: Gemini Robust Scraper (The "Smart" way)
-      if (!rawData && usedHtml && process.env.GEMINI_API_KEY) {
-        try {
-          console.log("Starting Gemini-powered scraping...");
-          const htmlChunk = usedHtml.length > 400000 ? usedHtml.substring(0, 400000) : usedHtml;
-          
-          const prompt = `I need to extract the song list from this Spotify HTML page. 
-          Look for:
-          1. Elements with aria-label="[Song Name] by [Artist Name]"
-          2. Text like "1. [Song] [Artist]" or similar patterns.
-          3. Links to tracks /track/[ID].
-          
-          Respond ONLY with this JSON format:
-          {
-            "name": "playlist name",
-            "tracks": {"items": [{"track": {"name": "title", "artists": [{"name": "artist"}]}}]}
-          }
-          If no tracks found, respond with an empty list. DO NOT include any text outside the JSON.`;
-
-          const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
-          const result = await model.generateContent({
-            contents: [{ role: 'user', parts: [{ text: prompt }, { text: htmlChunk }] }],
-            generationConfig: { responseMimeType: "application/json" }
-          });
-
-          const text = result.response.text();
-          if (text) {
-             try {
-               const cleanedJson = JSON.parse(text);
-               if (cleanedJson.name && cleanedJson.tracks?.items?.length > 0) {
-                 rawData = cleanedJson;
-                 console.log(`Gemini extracted ${rawData.tracks.items.length} tracks.`);
-               }
-             } catch (e) {}
-          }
-        } catch (e: any) {
-          console.error("Gemini scraping failed:", e.message);
         }
       }
 
