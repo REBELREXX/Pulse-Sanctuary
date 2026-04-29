@@ -525,21 +525,37 @@ export default function App() {
                exit={{ opacity: 0, y: -20 }}
                className="space-y-8"
              >
-               <div className="flex justify-between items-end">
-                <h2 className="text-4xl font-bold">Playlists</h2>
-                <div className="flex gap-4">
+              <div className="flex justify-between items-center sm:items-end flex-wrap gap-4">
+                <h2 className="text-3xl sm:text-4xl font-bold">Playlists</h2>
+                <div className="flex gap-2 sm:gap-4 w-full sm:w-auto">
                   <button 
                     type="button"
                     onClick={() => setShowSyncOverlay(true)}
-                    className="px-6 py-2 bg-[#1DB954] hover:bg-[#1ed760] rounded-full text-sm font-bold uppercase tracking-wider flex items-center gap-2 transition-all"
+                    className="flex-1 sm:flex-none px-4 sm:px-6 py-2 bg-[#1DB954] hover:bg-[#1ed760] rounded-full text-[10px] sm:text-sm font-bold uppercase tracking-wider flex items-center justify-center gap-2 transition-all"
                   >
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.372 0 0 5.372 0 12s5.372 12 12 12 12-5.372 12-12S18.628 0 12 0zm5.503 17.293c-.216.353-.674.464-1.026.248-2.855-1.745-6.448-2.138-10.68-1.17-.404.092-.81-.16-.902-.564-.092-.403.16-.81.564-.902 4.636-1.06 8.59-.61 11.796 1.347.353.216.464.674.248 1.026v.013zm1.47-3.255c-.272.443-.848.58-1.29.308-3.267-2.008-8.246-2.59-12.11-1.418-.497.151-1.02-.132-1.173-.628-.151-.497.132-1.02.628-1.173 4.417-1.34 9.904-.688 13.637 1.61.442.271.58.847.308 1.301zm.127-3.39c-3.92-2.327-10.37-2.542-14.127-1.403-.6.182-1.24-.162-1.423-.762-.182-.6.162-1.24.762-1.423 4.307-1.307 11.43-1.05 15.962 1.637.54.32.716 1.015.397 1.554s-1.015.716-1.554.397z"/></svg>
-                    Spotify Sync
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.372 0 0 5.372 0 12s5.372 12 12 12 12-5.372 12-12S18.628 0 12 0zm5.503 17.293c-.216.353-.674.464-1.026.248-2.855-1.745-6.448-2.138-10.68-1.17-.404.092-.81-.16-.902-.564-.092-.403.16-.81.564-.902 4.636-1.06 8.59-.61 11.796 1.347.353.216.464.674.248 1.026v.013zm1.47-3.255c-.272.443-.848.58-1.29.308-3.267-2.008-8.246-2.59-12.11-1.418-.497.151-1.02-.132-1.173-.628-.151-.497.132-1.02.628-1.173 4.417-1.34 9.904-.688 13.637 1.61.442.271.58.847.308 1.301zm.127-3.39c-3.92-2.327-10.37-2.542-14.127-1.403-.6.182-1.24-.162-1.423-.762-.182-.6.162-1.24.762-1.423 4.307-1.307 11.43-1.05 15.962 1.637.54.32.716 1.015.397 1.554s-1.015.716-1.554.397z"/></svg>
+                    <span>Spotify</span>
                   </button>
-                  <button className="px-6 py-2 bg-white/10 hover:bg-white/20 rounded-full text-sm font-bold uppercase tracking-wider transition-all">New Playlist</button>
+                  <button 
+                    onClick={() => {
+                      const name = prompt("Enter playlist name:");
+                      if (name) {
+                        setPlaylists(prev => [...prev, {
+                          id: Math.random().toString(36).substr(2, 9),
+                          name,
+                          songIds: [],
+                          coverArt: generateProceduralArt(name),
+                          createdAt: Date.now()
+                        }]);
+                      }
+                    }}
+                    className="flex-1 sm:flex-none px-4 sm:px-6 py-2 bg-white/10 hover:bg-white/20 rounded-full text-[10px] sm:text-sm font-bold uppercase tracking-wider transition-all"
+                  >
+                    New List
+                  </button>
                 </div>
                </div>
-               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
                   {playlists.length > 0 ? playlists.map(p => (
                     <div 
                       key={p.id} 
@@ -672,8 +688,8 @@ export default function App() {
       </main>
 
       {/* Bottom Navigation Bar */}
-      <nav className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[90] px-4">
-        <div className="bg-black/40 backdrop-blur-2xl border border-white/10 rounded-full p-2 flex items-center gap-1 shadow-2xl shadow-black/50">
+      <nav className="fixed bottom-4 sm:bottom-8 left-1/2 -translate-x-1/2 z-[90] px-4 w-full sm:w-auto">
+        <div className="bg-black/60 backdrop-blur-2xl border border-white/10 rounded-full p-1.5 sm:p-2 flex items-center justify-between sm:justify-center gap-1 shadow-2xl shadow-black/50 overflow-x-auto no-scrollbar">
           {[
             { id: 'home', icon: Music, label: 'Home' },
             { id: 'favorites', icon: (props: any) => <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>, label: 'Vault' },
@@ -683,17 +699,21 @@ export default function App() {
             <button
               key={item.id}
               onClick={() => setActiveSection(item.id as any)}
-              className={`relative px-6 py-3 rounded-full flex items-center gap-2 transition-all group ${activeSection === item.id ? 'text-white' : 'text-white/40 hover:text-white/60'}`}
+              className={`relative px-4 sm:px-6 py-2.5 sm:py-3 rounded-full flex items-center gap-2 transition-all group shrink-0 ${activeSection === item.id ? 'text-white' : 'text-white/40 hover:text-white/60'}`}
             >
-              <item.icon className="w-5 h-5" />
-              {activeSection === item.id && (
-                <motion.span 
-                  layoutId="nav-label"
-                  className="text-xs font-bold uppercase tracking-widest overflow-hidden whitespace-nowrap"
-                >
-                  {item.label}
-                </motion.span>
-              )}
+              <item.icon className="w-4 h-4 sm:w-5 sm:h-5" />
+              <AnimatePresence>
+                {activeSection === item.id && (
+                  <motion.span 
+                    initial={{ width: 0, opacity: 0 }}
+                    animate={{ width: 'auto', opacity: 1 }}
+                    exit={{ width: 0, opacity: 0 }}
+                    className="text-[10px] sm:text-xs font-bold uppercase tracking-widest overflow-hidden whitespace-nowrap"
+                  >
+                    {item.label}
+                  </motion.span>
+                )}
+              </AnimatePresence>
               {activeSection === item.id && (
                 <motion.div 
                   layoutId="nav-pill"

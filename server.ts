@@ -52,9 +52,9 @@ async function startServer() {
       const playlistId = playlistIdMatch[1];
 
       const userAgents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Version/17.4.1 Safari/537.36',
-        'WhatsApp/2.21.12.21 A',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+        'Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)',
         'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
         'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
       ];
@@ -65,12 +65,12 @@ async function startServer() {
             'User-Agent': ua,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.google.com/',
+            'Referer': 'https://open.spotify.com/',
             'Cache-Control': 'no-cache',
             'Pragma': 'no-cache',
             'Upgrade-Insecure-Requests': '1'
           },
-          timeout: 15000,
+          timeout: 20000,
           validateStatus: () => true
         });
       }
@@ -102,9 +102,16 @@ async function startServer() {
                   const content = match[1].trim();
                   try {
                     // Try direct JSON
-                    const parsed = JSON.parse(content);
-                    if (parsed.name || parsed.entities || parsed.tracks) {
+                    let parsed = JSON.parse(content);
+                    
+                    // If it's a string (wrapped JSON), parse again
+                    if (typeof parsed === 'string') {
+                      try { parsed = JSON.parse(parsed); } catch(e) {}
+                    }
+
+                    if (parsed.name || parsed.entities || parsed.tracks || parsed.props) {
                       rawData = parsed;
+                      console.log(`Found rawData in #${id}`);
                       break;
                     }
                   } catch (e) {
@@ -112,8 +119,9 @@ async function startServer() {
                     try {
                       const decoded = Buffer.from(content, 'base64').toString();
                       const parsed = JSON.parse(decoded);
-                      if (parsed.name || parsed.entities || parsed.tracks) {
+                      if (parsed.name || parsed.entities || parsed.tracks || parsed.props) {
                         rawData = parsed;
+                        console.log(`Found rawData in #${id} (Base64)`);
                         break;
                       }
                     } catch (err) {}
@@ -126,18 +134,19 @@ async function startServer() {
               // Pattern 2: Search for ANY script with playlist/track entities
               const scripts = html.match(/<script[^>]*>([\s\S]*?)<\/script>/g) || [];
               for (const script of scripts) {
-                if (script.includes('playlist') && (script.includes('track') || script.includes('items'))) {
+                const innerMatch = script.match(/>([\s\S]*?)<\/script>/);
+                const inner = innerMatch ? innerMatch[1].trim() : "";
+                if (inner.includes('playlist') && (inner.includes('track') || inner.includes('items'))) {
                   try {
-                    const innerMatch = script.match(/>([\s\S]*?)<\/script>/);
-                    const inner = innerMatch ? innerMatch[1].trim() : "";
                     if (inner.includes('{')) {
                       const startIdx = inner.indexOf('{');
                       const endIdx = inner.lastIndexOf('}');
                       if (startIdx !== -1 && endIdx !== -1) {
                         const jsonStr = inner.substring(startIdx, endIdx + 1);
                         const json = JSON.parse(jsonStr);
-                        if (json.name || json.entities || (json.tracks && json.tracks.items)) {
+                        if (json.name || json.entities || (json.tracks && json.tracks.items) || json.props) {
                           rawData = json;
+                          console.log(`Found rawData in arbitrary script tag`);
                           break;
                         }
                       }
@@ -155,19 +164,21 @@ async function startServer() {
 
       // Final Strategy: Fallback to Meta + Regex extraction if JSON parsing is still missing
       if (!rawData && usedHtml) {
+        console.log("JSON parsing failed, falling back to Regex extraction");
         const ogTitle = usedHtml.match(/<meta[^>]*property="og:title"[^>]*content="([^"]+)"/)?.[1] ||
                        usedHtml.match(/<meta[^>]*content="([^"]+)"[^>]*property="og:title"/)?.[1];
         const ogImage = usedHtml.match(/<meta[^>]*property="og:image"[^>]*content="([^"]+)"/)?.[1] ||
                        usedHtml.match(/<meta[^>]*content="([^"]+)"[^>]*property="og:image"/)?.[1];
+        const ogDescription = usedHtml.match(/<meta[^>]*property="og:description"[^>]*content="([^"]+)"/)?.[1] ||
+                             usedHtml.match(/<meta[^>]*content="([^"]+)"[^>]*property="og:description"/)?.[1];
         
         // Find track items in the HTML by looking for aria-labels (common pattern)
         const tracks = [];
-        const trackAriaMatches = [...usedHtml.matchAll(/aria-label="([^"]+) by ([^"]+)"/g)];
-        const trackLinkMatches = [...usedHtml.matchAll(/href="\/track\/([a-zA-Z0-9]+)"[^>]*>([^<]+)/g)];
         
+        // Strategy A: Aria Labels
+        const trackAriaMatches = [...usedHtml.matchAll(/aria-label="([^"]+) by ([^"]+)"/g)];
         for (const match of trackAriaMatches) {
           let [, name, artist] = match;
-          // Clean "Track: " prefix if present
           if (name.startsWith('Track: ')) name = name.replace('Track: ', '');
           
           tracks.push({
@@ -175,22 +186,40 @@ async function startServer() {
               id: `html-aria-${Math.random().toString(36).substr(2, 9)}`,
               name,
               artists: [{ name: artist }],
-              album: { name: ogTitle, images: [{ url: ogImage }] }
+              album: { name: ogTitle || "Unknown Album", images: [{ url: ogImage }] }
             }
           });
         }
 
-        // If no aria matches, try link matches
+        // Strategy B: OgDescription Parsing (Spotify often list tracks here like "Song 1, Song 2, ...")
+        if (tracks.length === 0 && ogDescription) {
+          const descTracks = ogDescription.split(',').map(s => s.trim()).filter(s => s.length > 2);
+          if (descTracks.length > 1) {
+             for (const t of descTracks) {
+               tracks.push({
+                 track: {
+                   id: `html-desc-${Math.random().toString(36).substr(2, 9)}`,
+                   name: t,
+                   artists: [{ name: "Artist" }],
+                   album: { name: ogTitle || "Unknown Album", images: [{ url: ogImage }] }
+                 }
+               });
+             }
+          }
+        }
+
+        // Strategy C: Link Matches
         if (tracks.length === 0) {
+          const trackLinkMatches = [...usedHtml.matchAll(/href="\/track\/([a-zA-Z0-9]+)"[^>]*>([^<]+)/g)];
           for (const match of trackLinkMatches) {
             const [, id, name] = match;
-            if (name === "Home" || name === "Search") continue;
+            if (name === "Home" || name === "Search" || name.includes("Spotify")) continue;
             tracks.push({
               track: {
                 id: `html-link-${id}`,
                 name: name.trim(),
                 artists: [{ name: "Unknown Artist" }],
-                album: { name: ogTitle, images: [{ url: ogImage }] }
+                album: { name: ogTitle || "Unknown Album", images: [{ url: ogImage }] }
               }
             });
           }
@@ -202,6 +231,7 @@ async function startServer() {
             images: [{ url: ogImage }],
             tracks: { items: tracks }
           };
+          console.log(`Extracted ${tracks.length} tracks via Regex/Meta fallback`);
         }
       }
 
@@ -209,83 +239,36 @@ async function startServer() {
       if (!rawData && usedHtml && process.env.GEMINI_API_KEY) {
         try {
           console.log("Starting Gemini-powered scraping...");
-          // Truncate HTML to focus on body and scripts to save tokens, but keep essential structure
-          const htmlChunk = usedHtml.substring(0, 500000); // 500k should be plenty for any playlist
+          const htmlChunk = usedHtml.length > 400000 ? usedHtml.substring(0, 400000) : usedHtml;
           
-          const prompt = `Extract all track information from this Spotify playlist page HTML. 
-          Return a JSON object with:
-          - "name": playlist name
-          - "images": [{ "url": "cover image url" }]
-          - "tracks": { "items": [ { "track": { "name": "track name", "artists": [{ "name": "artist name" }], "album": { "images": [{ "url": "image url" }] } } } ] }
-          Focus on data inside <script> tags with ids like "initial-state", "resource", or "__NEXT_DATA__", or track lists in the <body>.
-          Return ONLY valid JSON.`;
+          const prompt = `I need to extract the song list from this Spotify HTML page. 
+          Look for:
+          1. Elements with aria-label="[Song Name] by [Artist Name]"
+          2. Text like "1. [Song] [Artist]" or similar patterns.
+          3. Links to tracks /track/[ID].
+          
+          Respond ONLY with this JSON format:
+          {
+            "name": "playlist name",
+            "tracks": {"items": [{"track": {"name": "title", "artists": [{"name": "artist"}]}}]}
+          }
+          If no tracks found, respond with an empty list. DO NOT include any text outside the JSON.`;
 
-          const response = await genAI.models.generateContent({
-            model: "gemini-3-flash-preview",
-            contents: [{ parts: [{ text: prompt }, { text: htmlChunk }] }],
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  name: { type: Type.STRING },
-                  images: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: { url: { type: Type.STRING } }
-                    }
-                  },
-                  tracks: {
-                    type: Type.OBJECT,
-                    properties: {
-                      items: {
-                        type: Type.ARRAY,
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            track: {
-                              type: Type.OBJECT,
-                              properties: {
-                                name: { type: Type.STRING },
-                                artists: {
-                                  type: Type.ARRAY,
-                                  items: {
-                                    type: Type.OBJECT,
-                                    properties: { name: { type: Type.STRING } }
-                                  }
-                                },
-                                album: {
-                                  type: Type.OBJECT,
-                                  properties: {
-                                    images: {
-                                      type: Type.ARRAY,
-                                      items: {
-                                        type: Type.OBJECT,
-                                        properties: { url: { type: Type.STRING } }
-                                      }
-                                    }
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                },
-                required: ["name"]
-              }
-            }
+          const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
+          const result = await model.generateContent({
+            contents: [{ role: 'user', parts: [{ text: prompt }, { text: htmlChunk }] }],
+            generationConfig: { responseMimeType: "application/json" }
           });
 
-          if (response.text) {
-             const cleanedJson = JSON.parse(response.text);
-             if (cleanedJson.name && cleanedJson.tracks?.items?.length > 0) {
-               rawData = cleanedJson;
-               console.log(`Gemini extracted ${rawData.tracks.items.length} tracks.`);
-             }
+          const text = result.response.text();
+          if (text) {
+             try {
+               const cleanedJson = JSON.parse(text);
+               if (cleanedJson.name && cleanedJson.tracks?.items?.length > 0) {
+                 rawData = cleanedJson;
+                 console.log(`Gemini extracted ${rawData.tracks.items.length} tracks.`);
+               }
+             } catch (e) {}
           }
         } catch (e: any) {
           console.error("Gemini scraping failed:", e.message);
@@ -304,28 +287,61 @@ async function startServer() {
 
       let normalized: any = { name: "Imported Playlist", images: [], tracks: { items: [] } };
 
-      // Normalization Logic for different Spotify Data Structures
-      if (rawData.name && rawData.tracks) {
-        normalized = rawData;
-      } else if (rawData.entities?.items) {
-        const pKey = Object.keys(rawData.entities.items).find(k => k.includes(':playlist:'));
-        if (pKey) {
-          const p = rawData.entities.items[pKey];
-          normalized = {
-            name: p.name,
-            images: p.images?.items?.map((i: any) => ({ url: i.sources?.[0]?.url })),
-            tracks: {
-              items: p.content?.items?.map((i: any) => ({ track: i.item?.data || i }))
+      // Multi-layered Normalization Strategy
+      function extractFromAnywhere(obj: any): any[] {
+        if (!obj || typeof obj !== 'object') return [];
+        
+        // Priority 1: Direct matches for known Spotify structures
+        if (obj.tracks?.items) return obj.tracks.items;
+        if (obj.playlistData?.tracks?.items) return obj.playlistData.tracks.items;
+        if (obj.pageProps?.playlistData?.tracks?.items) return obj.pageProps.playlistData.tracks.items;
+        if (obj.state?.playlist?.tracks?.items) return obj.state.playlist.tracks.items;
+        
+        // Priority 2: entities.items structure (Common in 'initial-state')
+        if (obj.entities?.items) {
+          const tracks = [];
+          for (const key in obj.entities.items) {
+            if (key.includes(':track:')) {
+              tracks.push({ track: obj.entities.items[key] });
             }
-          };
+          }
+          if (tracks.length > 0) return tracks;
         }
-      } else if (rawData.props?.pageProps?.playlistData) {
-        normalized = rawData.props.pageProps.playlistData;
+
+        // Priority 3: Recursive search for anything that looks like an array of tracks
+        if (Array.isArray(obj)) {
+          if (obj.length > 0 && (obj[0].track || obj[0].name || obj[0].item?.data)) {
+            return obj;
+          }
+        }
+
+        let tracks: any[] = [];
+        for (const key in obj) {
+          // Skip enormous metadata keys that aren't tracks
+          if (key === 'config' || key === 'session' || key === 'user') continue;
+          
+          if (typeof obj[key] === 'object' && obj[key] !== null) {
+            const found = extractFromAnywhere(obj[key]);
+            if (found.length > tracks.length) tracks = found;
+          }
+        }
+        return tracks;
       }
 
-      const playlistName = normalized.name || "Imported Playlist";
-      const playlistImage = normalized.images?.[0]?.url || "";
+      const foundTracks = extractFromAnywhere(rawData);
+      
+      const playlistName = rawData.name || rawData.playlistData?.name || rawData.props?.pageProps?.playlistData?.name || "Imported Playlist";
+      const rawImages = rawData.images || rawData.playlistData?.images || rawData.props?.pageProps?.playlistData?.images || [];
+      const playlistImage = Array.isArray(rawImages) ? (rawImages[0]?.url || rawImages[0]?.sources?.[0]?.url || "") : "";
+
+      normalized = {
+        name: playlistName,
+        images: Array.isArray(rawImages) ? rawImages : [],
+        tracks: { items: foundTracks }
+      };
+
       const tracksData = normalized.tracks?.items || [];
+      console.log(`Final normalized track count: ${tracksData.length}`);
 
       if (tracksData.length === 0) {
         return res.status(400).json({ error: "Empty playlist or private data. Ensure it is a PUBLIC playlist." });
