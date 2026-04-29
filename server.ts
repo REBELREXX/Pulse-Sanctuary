@@ -131,7 +131,28 @@ async function startServer() {
 
               if (rawData) break;
 
-              // Pattern 2: Search for ANY script with playlist/track entities
+              // Pattern 3: Embed-specific track list regex
+              if (url.includes('/embed/')) {
+                 const embedTracks = [...html.matchAll(/{"track":{"name":"([^"]+)"[^{}]*,"uri":"spotify:track:([a-zA-Z0-9]+)"[^{}]*,"artists":\[{"name":"([^"]+)"/g)];
+                 if (embedTracks.length > 0) {
+                    rawData = {
+                      name: html.match(/<title>([^<]+)<\/title>/)?.[1] || "Imported Playlist",
+                      tracks: {
+                        items: embedTracks.map(m => ({
+                          track: {
+                            id: m[2],
+                            name: m[1],
+                            artists: [{ name: m[3] }]
+                          }
+                        }))
+                      }
+                    };
+                    console.log(`Found ${embedTracks.length} tracks via Embed Regex`);
+                    break;
+                 }
+              }
+
+              // Pattern 4: Search for ANY script with playlist/track entities
               const scripts = html.match(/<script[^>]*>([\s\S]*?)<\/script>/g) || [];
               for (const script of scripts) {
                 const innerMatch = script.match(/>([\s\S]*?)<\/script>/);

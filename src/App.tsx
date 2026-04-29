@@ -135,6 +135,47 @@ export default function App() {
   const audio = useAudioPlayer(effectiveSongs);
   const playerRef = useRef<any>(null);
 
+  // Persistence: Load data on mount
+  useEffect(() => {
+    try {
+      const savedSongs = localStorage.getItem('vault_songs');
+      const savedPlaylists = localStorage.getItem('vault_playlists');
+      const savedFavorites = localStorage.getItem('vault_favorites');
+
+      if (savedSongs) {
+        const parsed = JSON.parse(savedSongs);
+        if (Array.isArray(parsed)) setSongs(parsed);
+      }
+      if (savedPlaylists) {
+        const parsed = JSON.parse(savedPlaylists);
+        if (Array.isArray(parsed)) setPlaylists(parsed);
+      }
+      if (savedFavorites) {
+        const parsed = JSON.parse(savedFavorites);
+        if (Array.isArray(parsed)) setFavoriteIds(new Set(parsed));
+      }
+    } catch (e) {
+      console.error("Failed to load library from storage", e);
+    }
+  }, []);
+
+  // Persistence: Save data on changes
+  useEffect(() => {
+    if (songs.length > 0) {
+      localStorage.setItem('vault_songs', JSON.stringify(songs));
+    }
+  }, [songs]);
+
+  useEffect(() => {
+    if (playlists.length > 0) {
+      localStorage.setItem('vault_playlists', JSON.stringify(playlists));
+    }
+  }, [playlists]);
+
+  useEffect(() => {
+    localStorage.setItem('vault_favorites', JSON.stringify(Array.from(favoriteIds)));
+  }, [favoriteIds]);
+
   // Sync seek to ReactPlayer
   useEffect(() => {
     if (audio.currentSong?.youtubeId && playerRef.current) {
@@ -525,31 +566,33 @@ export default function App() {
                exit={{ opacity: 0, y: -20 }}
                className="space-y-8"
              >
-              <div className="flex justify-between items-center sm:items-end flex-wrap gap-4">
-                <h2 className="text-3xl sm:text-4xl font-bold">Playlists</h2>
-                <div className="flex gap-2 sm:gap-4 w-full sm:w-auto">
+             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
+                <h2 className="text-4xl sm:text-5xl font-bold tracking-tight">Playlists</h2>
+                <div className="flex gap-3 w-full sm:w-auto">
                   <button 
                     type="button"
                     onClick={() => setShowSyncOverlay(true)}
-                    className="flex-1 sm:flex-none px-4 sm:px-6 py-2 bg-[#1DB954] hover:bg-[#1ed760] rounded-full text-[10px] sm:text-sm font-bold uppercase tracking-wider flex items-center justify-center gap-2 transition-all"
+                    className="flex-1 sm:flex-none px-6 py-3 bg-[#1DB954] hover:bg-[#1ed760] rounded-full text-xs font-bold uppercase tracking-widest flex items-center justify-center gap-2 transition-all shadow-lg shadow-green-500/20 active:scale-95"
                   >
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.372 0 0 5.372 0 12s5.372 12 12 12 12-5.372 12-12S18.628 0 12 0zm5.503 17.293c-.216.353-.674.464-1.026.248-2.855-1.745-6.448-2.138-10.68-1.17-.404.092-.81-.16-.902-.564-.092-.403.16-.81.564-.902 4.636-1.06 8.59-.61 11.796 1.347.353.216.464.674.248 1.026v.013zm1.47-3.255c-.272.443-.848.58-1.29.308-3.267-2.008-8.246-2.59-12.11-1.418-.497.151-1.02-.132-1.173-.628-.151-.497.132-1.02.628-1.173 4.417-1.34 9.904-.688 13.637 1.61.442.271.58.847.308 1.301zm.127-3.39c-3.92-2.327-10.37-2.542-14.127-1.403-.6.182-1.24-.162-1.423-.762-.182-.6.162-1.24.762-1.423 4.307-1.307 11.43-1.05 15.962 1.637.54.32.716 1.015.397 1.554s-1.015.716-1.554.397z"/></svg>
-                    <span>Spotify</span>
+                    <span>Spotify Sync</span>
                   </button>
                   <button 
                     onClick={() => {
-                      const name = prompt("Enter playlist name:");
-                      if (name) {
-                        setPlaylists(prev => [...prev, {
+                      const name = window.prompt("Enter playlist name:");
+                      if (name && name.trim()) {
+                        const newPlaylist = {
                           id: Math.random().toString(36).substr(2, 9),
-                          name,
+                          name: name.trim(),
                           songIds: [],
                           coverArt: generateProceduralArt(name),
                           createdAt: Date.now()
-                        }]);
+                        };
+                        setPlaylists(prev => [...prev, newPlaylist]);
+                        setSelectedPlaylistId(newPlaylist.id);
                       }
                     }}
-                    className="flex-1 sm:flex-none px-4 sm:px-6 py-2 bg-white/10 hover:bg-white/20 rounded-full text-[10px] sm:text-sm font-bold uppercase tracking-wider transition-all"
+                    className="flex-1 sm:flex-none px-6 py-3 bg-white/5 hover:bg-white/10 rounded-full text-xs font-bold uppercase tracking-widest transition-all border border-white/10 flex items-center justify-center active:scale-95"
                   >
                     New List
                   </button>
