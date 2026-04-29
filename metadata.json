@@ -1,0 +1,6 @@
+{
+  "name": "Pulse",
+  "description": "A premium, exclusive music sanctuary for the modern audiophile.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["audio_playback", "file_management"]
+}
