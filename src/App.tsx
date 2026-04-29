@@ -11,13 +11,16 @@ const Player = ReactPlayer as any;
 import { 
   Play, Pause, SkipBack, SkipForward, 
   Plus, Search, MoreHorizontal, ListMusic, 
-  Settings, User, Music, Shuffle, Repeat, Volume2 
+  Settings, User, Music, Shuffle, Repeat, Volume2, Sparkles, Wand2, Loader2 
 } from 'lucide-react';
 import Background from './components/Background';
 import Visualizer from './components/Visualizer';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
 import { Song, Playlist, PlaybackMode } from './types';
 import { generateProceduralArt, getAccentColor } from './utils/proceduralArt';
+import { db } from './lib/db';
+import { Edit2, Trash2, X } from 'lucide-react';
+import { enrichSongMetadata, generateSongCover } from './services/aiService';
 
 /**
  * Cockpit component for playback controls
@@ -127,6 +130,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
+  const [isEnriching, setIsEnriching] = useState(false);
+  const [activePlayView, setActivePlayView] = useState<'cover' | 'lyrics'>('cover');
   
   const effectiveSongs = playingPlaylistId 
     ? songs.filter(s => playlists.find(p => p.id === playingPlaylistId)?.songIds.includes(s.id))
@@ -134,46 +139,50 @@ export default function App() {
 
   const audio = useAudioPlayer(effectiveSongs);
   const playerRef = useRef<any>(null);
+  const [songToEdit, setSongToEdit] = useState<Song | null>(null);
 
-  // Persistence: Load data on mount
+  // Persistence: Load data on mount from IndexedDB
   useEffect(() => {
-    try {
-      const savedSongs = localStorage.getItem('vault_songs');
-      const savedPlaylists = localStorage.getItem('vault_playlists');
-      const savedFavorites = localStorage.getItem('vault_favorites');
+    async function loadLibrary() {
+      try {
+        const savedSongs = await db.songs.toArray();
+        const savedPlaylists = await db.playlists.toArray();
+        const savedFavorites = await db.favorites.toArray();
 
-      if (savedSongs) {
-        const parsed = JSON.parse(savedSongs);
-        if (Array.isArray(parsed)) setSongs(parsed);
+        // Regenerate Blob URLs for local files
+        const hydratedSongs = savedSongs.map(song => {
+          if (song.blob) {
+            return { ...song, fileUrl: URL.createObjectURL(song.blob) };
+          }
+          return song;
+        });
+
+        setSongs(hydratedSongs);
+        setPlaylists(savedPlaylists);
+        setFavoriteIds(new Set(savedFavorites.map(f => f.id)));
+      } catch (e) {
+        console.error("Failed to load library from IndexedDB", e);
       }
-      if (savedPlaylists) {
-        const parsed = JSON.parse(savedPlaylists);
-        if (Array.isArray(parsed)) setPlaylists(parsed);
-      }
-      if (savedFavorites) {
-        const parsed = JSON.parse(savedFavorites);
-        if (Array.isArray(parsed)) setFavoriteIds(new Set(parsed));
-      }
-    } catch (e) {
-      console.error("Failed to load library from storage", e);
     }
+    loadLibrary();
+
+    // Cleanup object URLs on unmount
+    return () => {
+      songs.forEach(s => {
+        if (s.fileUrl.startsWith('blob:')) {
+          URL.revokeObjectURL(s.fileUrl);
+        }
+      });
+    };
   }, []);
 
-  // Persistence: Save data on changes
+  // Sync favorites to DB
   useEffect(() => {
-    if (songs.length > 0) {
-      localStorage.setItem('vault_songs', JSON.stringify(songs));
+    async function syncFavs() {
+      await db.favorites.clear();
+      await db.favorites.bulkAdd(Array.from(favoriteIds).map(id => ({ id })));
     }
-  }, [songs]);
-
-  useEffect(() => {
-    if (playlists.length > 0) {
-      localStorage.setItem('vault_playlists', JSON.stringify(playlists));
-    }
-  }, [playlists]);
-
-  useEffect(() => {
-    localStorage.setItem('vault_favorites', JSON.stringify(Array.from(favoriteIds)));
+    syncFavs();
   }, [favoriteIds]);
 
   // Sync seek to ReactPlayer
@@ -222,7 +231,9 @@ export default function App() {
         id: `spotify-${t.id}-${Date.now()}-${index}`,
         name: t.name,
         artist: t.artist,
-        duration: 0,
+        album: t.album,
+        duration: t.duration || 0,
+        durationStr: t.duration ? `${Math.floor(t.duration / 60)}:${Math.floor(t.duration % 60).toString().padStart(2, '0')}` : undefined,
         fileUrl: t.fileUrl || "",
         youtubeId: t.youtubeId,
         coverArt: t.image || generateProceduralArt(t.name),
@@ -236,6 +247,10 @@ export default function App() {
         coverArt: data.coverArt || generateProceduralArt(data.name),
         createdAt: Date.now(),
       };
+
+      // Persistence: Save to DB
+      await db.songs.bulkAdd(importedSongs);
+      await db.playlists.add(newPlaylist);
 
       // Use functional state updates to ensure consistency
       setSongs(prev => {
@@ -257,7 +272,7 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -268,14 +283,103 @@ export default function App() {
       id: Math.random().toString(36).substr(2, 9),
       name,
       artist: 'Unknown Artist',
-      duration: 0, // Would need metadata parsing for real duration
+      duration: 0,
       fileUrl: url,
+      blob: file, // Store actual file binary in IndexedDB
       coverArt: generateProceduralArt(name),
       addedAt: Date.now(),
     };
 
-    setSongs([...songs, newSong]);
-    setIsUploading(false);
+    try {
+      await db.songs.add(newSong);
+      setSongs(prev => [...prev, newSong]);
+      setIsUploading(false);
+
+      // Trigger automatic background enrichment
+      enrichInBackground(newSong);
+    } catch (err) {
+      console.error("Failed to save uploaded song", err);
+    }
+  };
+
+  const enrichInBackground = async (song: Song) => {
+    try {
+      const enriched = await enrichSongMetadata(song.name, song.artist);
+      if (enriched) {
+        const aiCover = await generateSongCover(enriched.description, enriched.name);
+        const updated: Song = {
+          ...song,
+          name: enriched.name,
+          artist: enriched.artist,
+          album: enriched.album,
+          lyrics: enriched.lyrics,
+          lyricLines: enriched.lyricLines,
+          coverArt: aiCover || song.coverArt
+        };
+        await db.songs.put(updated);
+        setSongs(prev => prev.map(s => s.id === song.id ? updated : s));
+      }
+    } catch (err) {
+      console.error("Background enrichment failed", err);
+    }
+  };
+
+  const deleteSong = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm("Are you sure you want to delete this song?")) return;
+    
+    try {
+      await db.songs.delete(id);
+      setSongs(prev => prev.filter(s => s.id !== id));
+      // Remove from playlists
+      const updatedPlaylists = playlists.map(p => ({
+        ...p,
+        songIds: p.songIds.filter(sid => sid !== id)
+      }));
+      setPlaylists(updatedPlaylists);
+      await Promise.all(updatedPlaylists.map(p => db.playlists.put(p)));
+      
+      const newFavs = new Set(favoriteIds);
+      newFavs.delete(id);
+      setFavoriteIds(newFavs);
+    } catch (err) {
+      console.error("Delete failed", err);
+    }
+  };
+
+  const updateSong = async (updated: Song) => {
+    try {
+      await db.songs.put(updated);
+      setSongs(prev => prev.map(s => s.id === updated.id ? updated : s));
+      setSongToEdit(null);
+    } catch (err) {
+      console.error("Update failed", err);
+    }
+  };
+
+  const handleMagicEnrich = async () => {
+    if (!songToEdit) return;
+    setIsEnriching(true);
+    try {
+      const enriched = await enrichSongMetadata(songToEdit.name, songToEdit.artist);
+      if (enriched) {
+        // Generate a new AI cover as well
+        const aiCover = await generateSongCover(enriched.description, enriched.name);
+        setSongToEdit({
+          ...songToEdit,
+          name: enriched.name,
+          artist: enriched.artist,
+          album: enriched.album,
+          lyrics: enriched.lyrics,
+          lyricLines: enriched.lyricLines,
+          coverArt: aiCover || songToEdit.coverArt
+        });
+      }
+    } catch (err) {
+      console.error("Magic Enrichment failed", err);
+    } finally {
+      setIsEnriching(false);
+    }
   };
 
   const selectedPlaylist = playlists.find(p => p.id === selectedPlaylistId);
@@ -414,10 +518,17 @@ export default function App() {
                           </div>
                           <button 
                             onClick={() => setIsUploading(true)}
-                            className="bg-white text-black px-6 rounded-2xl font-bold flex items-center gap-2 hover:bg-white/90 active:scale-95 transition-all"
+                            className="bg-white text-black px-6 rounded-2xl font-bold flex items-center gap-2 hover:bg-white/90 active:scale-95 transition-all text-xs uppercase tracking-widest"
                           >
-                            <Plus className="w-5 h-5" />
+                            <Plus className="w-4 h-4" />
                             <span>Add New</span>
+                          </button>
+                          <button 
+                            onClick={() => setShowCreatePlaylistModal(true)}
+                            className="bg-white/5 border border-white/10 text-white px-6 rounded-2xl font-bold flex items-center gap-2 hover:bg-white/10 active:scale-95 transition-all text-xs uppercase tracking-widest"
+                          >
+                            <ListMusic className="w-4 h-4 opacity-60" />
+                            <span>New List</span>
                           </button>
                           <input 
                             type="file" 
@@ -458,26 +569,53 @@ export default function App() {
                                        </div>
                                      )}
                                   </div>
-                                  <div className="flex-1">
-                                    <h4 className={`font-medium ${audio.currentSong?.id === song.id ? 'text-purple-400' : 'text-white'}`}>{song.name}</h4>
-                                    <p className="text-xs text-white/40 uppercase tracking-widest font-bold">{song.artist}</p>
+                                  <div className="flex-1 min-w-0">
+                                    <h4 className={`font-medium truncate ${audio.currentSong?.id === song.id ? 'text-[#1DB954]' : 'text-white'}`}>{song.name}</h4>
+                                    <div className="flex items-center gap-2 text-xs text-white/40 font-bold uppercase tracking-widest truncate">
+                                      <span>{song.artist}</span>
+                                      {song.album && (
+                                        <>
+                                          <span className="w-1 h-1 rounded-full bg-white/20" />
+                                          <span className="opacity-60">{song.album}</span>
+                                        </>
+                                      )}
+                                    </div>
                                   </div>
                                   <button 
                                     onClick={(e) => toggleFavorite(song.id, e)}
-                                    className={`p-2 transition-colors ${favoriteIds.has(song.id) ? 'text-red-400' : 'text-white/20 hover:text-white/40'}`}
+                                    className={`p-2 transition-colors flex-shrink-0 ${favoriteIds.has(song.id) ? 'text-red-400 opacity-100' : 'text-white/20 hover:text-white/40 md:opacity-0 md:group-hover:opacity-100 opacity-60'}`}
                                   >
                                     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill={favoriteIds.has(song.id) ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>
                                   </button>
-                                  <span className="text-xs text-white/30 font-mono w-12 text-right">--:--</span>
+                                  <span className="hidden sm:block text-xs text-white/30 font-mono w-16 text-right flex-shrink-0">
+                                    {song.durationStr || (song.duration ? `${Math.floor(song.duration / 60)}:${Math.floor(song.duration % 60).toString().padStart(2, '0')}` : '--:--')}
+                                  </span>
                                   <button 
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       setSongToAddToPlaylist(song);
                                     }}
-                                    className="p-2 opacity-0 group-hover:opacity-100 transition-opacity hover:text-[#1DB954]"
+                                    className="p-2 md:opacity-0 md:group-hover:opacity-100 transition-opacity hover:text-[#1DB954] opacity-60 flex-shrink-0"
                                     title="Add to Playlist"
                                   >
                                     <ListMusic className="w-5 h-5 opacity-60 group-hover:opacity-100" />
+                                  </button>
+                                  <button 
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setSongToEdit(song);
+                                    }}
+                                    className="p-2 md:opacity-0 md:group-hover:opacity-100 transition-opacity hover:text-white opacity-60 flex-shrink-0"
+                                    title="Edit Song"
+                                  >
+                                    <Edit2 className="w-4 h-4 opacity-40 group-hover:opacity-100" />
+                                  </button>
+                                  <button 
+                                    onClick={(e) => deleteSong(song.id, e)}
+                                    className="p-2 md:opacity-0 md:group-hover:opacity-100 transition-opacity hover:text-red-400 text-white/20 opacity-60 flex-shrink-0"
+                                    title="Delete Song"
+                                  >
+                                    <Trash2 className="w-4 h-4 opacity-40 group-hover:opacity-100" />
                                   </button>
                                   <button className="p-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                     <MoreHorizontal className="w-5 h-5 opacity-40" />
@@ -501,21 +639,104 @@ export default function App() {
                         exit={{ opacity: 0, x: -20 }}
                         className="space-y-8"
                       >
-                        <div className="aspect-square max-w-[400px] mx-auto rounded-[3rem] overflow-hidden relative shadow-2xl shadow-black/50 group">
-                          <div 
-                            className="absolute inset-0 bg-cover bg-center transition-transform duration-1000 group-hover:scale-110" 
-                            style={{ background: audio.currentSong?.coverArt || 'rgba(255,255,255,0.05)' }} 
-                          />
-                          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
-                          
-                          <div className="absolute bottom-12 left-12 right-12 text-center">
-                             <h2 className="text-3xl font-bold mb-2 tracking-tight">
-                               {audio.currentSong?.name || 'Nothing playing'}
-                             </h2>
-                             <p className="text-sm text-white/60 uppercase tracking-[0.2em] font-bold">
-                               {audio.currentSong?.artist || '--'}
-                             </p>
-                          </div>
+                        <div className="max-w-[400px] mx-auto space-y-4">
+                           <div className="flex justify-center gap-2">
+                             <button 
+                               onClick={() => setActivePlayView('cover')}
+                               className={`px-4 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all ${activePlayView === 'cover' ? 'bg-white text-black' : 'bg-white/5 text-white/40'}`}
+                             >
+                               Cover
+                             </button>
+                             <button 
+                               onClick={() => setActivePlayView('lyrics')}
+                               className={`px-4 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all ${activePlayView === 'lyrics' ? 'bg-white text-black' : 'bg-white/5 text-white/40'}`}
+                             >
+                               Lyrics
+                             </button>
+                           </div>
+
+                           <AnimatePresence mode="wait">
+                             {activePlayView === 'cover' ? (
+                               <motion.div 
+                                 key="cover"
+                                 initial={{ opacity: 0, scale: 0.95 }}
+                                 animate={{ opacity: 1, scale: 1 }}
+                                 exit={{ opacity: 0, scale: 0.95 }}
+                                 className="aspect-square rounded-[3.5rem] overflow-hidden relative shadow-2xl shadow-black/50 group"
+                               >
+                                 <div 
+                                   className="absolute inset-0 bg-cover bg-center transition-transform duration-1000 group-hover:scale-110" 
+                                   style={{ background: audio.currentSong?.coverArt || 'rgba(255,255,255,0.05)' }} 
+                                 />
+                                 <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+                                 
+                                 <div className="absolute bottom-12 left-12 right-12 text-center">
+                                    <h2 className="text-3xl font-bold mb-2 tracking-tight">
+                                      {audio.currentSong?.name || 'Nothing playing'}
+                                    </h2>
+                                    <p className="text-sm text-white/60 uppercase tracking-[0.2em] font-bold">
+                                      {audio.currentSong?.artist || '--'}
+                                    </p>
+                                 </div>
+                               </motion.div>
+                             ) : (
+                               <motion.div 
+                                 key="lyrics"
+                                 initial={{ opacity: 0, y: 20 }}
+                                 animate={{ opacity: 1, y: 0 }}
+                                 exit={{ opacity: 0, y: -20 }}
+                                 className="aspect-square rounded-[3.5rem] bg-white/[0.03] border border-white/10 p-8 sm:p-12 overflow-y-auto custom-scrollbar relative group text-center scroll-smooth"
+                               >
+                                  <div className="absolute inset-0 bg-gradient-to-b from-[#1A1A1A] via-transparent to-[#1A1A1A] pointer-events-none z-10 opacity-60" />
+                                  <div className="relative z-0 py-24 px-4 h-full flex flex-col items-center">
+                                     {audio.currentSong?.lyricLines && audio.currentSong.lyricLines.length > 0 ? (
+                                       <div className="flex flex-col gap-10 w-full">
+                                         {audio.currentSong.lyricLines.map((line, i) => {
+                                           const isFinished = audio.progress > line.time;
+                                           const isActive = audio.progress >= line.time && 
+                                             (!audio.currentSong?.lyricLines?.[i+1] || audio.progress < audio.currentSong.lyricLines[i+1].time);
+                                           
+                                           return (
+                                             <motion.p 
+                                               key={i}
+                                               ref={(el) => {
+                                                 if (isActive && el) {
+                                                   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                                 }
+                                               }}
+                                               animate={{ 
+                                                 scale: isActive ? 1.1 : 1,
+                                                 opacity: isActive || isFinished ? 1 : 0.2,
+                                                 color: isActive ? '#FFFFFF' : (isFinished ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.2)'),
+                                                 filter: isActive ? 'blur(0px)' : (isFinished ? 'blur(0px)' : 'blur(1px)')
+                                               }}
+                                               transition={{ duration: 0.4 }}
+                                               className={`text-xl sm:text-3xl font-black leading-tight transition-all cursor-default select-none tracking-tight px-4`}
+                                             >
+                                               {line.text}
+                                             </motion.p>
+                                           );
+                                         })}
+                                       </div>
+                                     ) : audio.currentSong?.lyrics ? (
+                                       <div className="flex flex-col gap-6 w-full opacity-60">
+                                         {audio.currentSong.lyrics.split('\n').filter(line => line.trim()).map((line, i) => (
+                                           <p key={i} className="text-lg font-medium leading-relaxed">{line}</p>
+                                         ))}
+                                       </div>
+                                     ) : (
+                                       <div className="h-full flex flex-col items-center justify-center py-20 space-y-4 opacity-20">
+                                          <Sparkles className="w-12 h-12 animate-pulse" />
+                                          <p className="text-xs font-black uppercase tracking-[0.3em]">No lyrics available</p>
+                                          <p className="text-[10px] opacity-60 max-w-[200px] mx-auto leading-relaxed">
+                                            Edit this track and click "AI Enrich" to fetch time-synced lyrics.
+                                          </p>
+                                       </div>
+                                     )}
+                                  </div>
+                               </motion.div>
+                             )}
+                           </AnimatePresence>
                         </div>
 
                         <Visualizer 
@@ -549,19 +770,46 @@ export default function App() {
                   <div className="divide-y divide-white/5">
                     {songs.filter(s => favoriteIds.has(s.id)).map((song, idx) => (
                        <div 
-                       key={song.id} 
-                       onClick={() => audio.playSong(songs.indexOf(song))}
-                       className="group flex items-center gap-4 p-4 hover:bg-white/5 cursor-pointer transition-all"
-                     >
-                       <div className="w-12 h-12 rounded-xl overflow-hidden" style={{ background: song.coverArt }} />
-                       <div className="flex-1">
-                         <h4 className="font-medium">{song.name}</h4>
-                         <p className="text-xs opacity-40 uppercase tracking-widest font-bold">{song.artist}</p>
-                       </div>
-                       <button onClick={(e) => toggleFavorite(song.id, e)} className="text-red-400 p-2">
-                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>
-                       </button>
-                     </div>
+                        key={song.id} 
+                        onClick={() => audio.playSong(songs.indexOf(song))}
+                        className="group flex items-center gap-4 p-4 hover:bg-white/5 cursor-pointer transition-all active:scale-[0.99]"
+                      >
+                        <div className="w-12 h-12 rounded-xl overflow-hidden relative flex-shrink-0 shadow-lg">
+                           <div className="absolute inset-0" style={{ background: song.coverArt }} />
+                           <div className="absolute inset-0 flex items-center justify-center bg-black/0 group-hover:bg-black/40 transition-colors">
+                              <Play className="w-5 h-5 opacity-0 group-hover:opacity-100 transition-opacity fill-white" />
+                           </div>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <h4 className={`font-medium truncate ${audio.currentSong?.id === song.id ? 'text-[#1DB954]' : 'text-white'}`}>{song.name}</h4>
+                          <div className="flex items-center gap-2 text-[10px] text-white/40 font-bold uppercase tracking-widest truncate">
+                            <span>{song.artist}</span>
+                            {song.album && (
+                              <>
+                                <span className="w-1 h-1 rounded-full bg-white/20" />
+                                <span className="opacity-60">{song.album}</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSongToAddToPlaylist(song);
+                            }}
+                            className="p-2 opacity-60 hover:opacity-100 hover:text-[#1DB954]"
+                          >
+                            <ListMusic className="w-4 h-4" />
+                          </button>
+                          <button onClick={(e) => toggleFavorite(song.id, e)} className="text-red-400 p-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>
+                          </button>
+                        </div>
+                        <span className="hidden sm:block text-xs text-white/30 font-mono w-16 text-right">
+                          {song.durationStr || (song.duration ? `${Math.floor(song.duration / 60)}:${Math.floor(song.duration % 60).toString().padStart(2, '0')}` : '--:--')}
+                        </span>
+                      </div>
                     ))}
                   </div>
                 ) : (
@@ -675,9 +923,20 @@ export default function App() {
                                    <span className="w-8 text-xs font-mono opacity-20 text-center font-bold">{i + 1}</span>
                                    <div className="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0" style={{ background: song.coverArt }} />
                                    <div className="flex-1 min-w-0">
-                                      <h4 className={`font-medium truncate ${audio.currentSong?.id === song.id ? 'text-purple-400' : 'text-white'}`}>{song.name}</h4>
-                                      <p className="text-[10px] opacity-30 uppercase tracking-widest font-bold truncate">{song.artist}</p>
+                                      <h4 className={`font-medium truncate ${audio.currentSong?.id === song.id ? 'text-[#1DB954]' : 'text-white'}`}>{song.name}</h4>
+                                      <div className="flex items-center gap-2 text-[10px] text-white/40 font-bold uppercase tracking-widest truncate">
+                                        <span>{song.artist}</span>
+                                        {song.album && (
+                                          <>
+                                            <span className="w-1 h-1 rounded-full bg-white/20" />
+                                            <span className="opacity-60">{song.album}</span>
+                                          </>
+                                        )}
+                                      </div>
                                    </div>
+                                   <span className="text-xs text-white/30 font-mono w-16 text-right">
+                                      {song.durationStr || (song.duration ? `${Math.floor(song.duration / 60)}:${Math.floor(song.duration % 60).toString().padStart(2, '0')}` : '--:--')}
+                                   </span>
                                    <button 
                                      onClick={(e) => toggleFavorite(song.id, e)}
                                      className={`p-2 transition-colors ${favoriteIds.has(song.id) ? 'text-red-400' : 'text-white/20 hover:text-white/40'}`}
@@ -833,7 +1092,11 @@ export default function App() {
                       coverArt: generateProceduralArt(newPlaylistName),
                       createdAt: Date.now()
                     };
-                    setPlaylists(prev => [...prev, newPlaylist]);
+                    setPlaylists(prev => {
+                      const updated = [...prev, newPlaylist];
+                      db.playlists.add(newPlaylist);
+                      return updated;
+                    });
                     setSelectedPlaylistId(newPlaylist.id);
                     setNewPlaylistName("");
                     setShowCreatePlaylistModal(false);
@@ -858,7 +1121,11 @@ export default function App() {
                       coverArt: generateProceduralArt(newPlaylistName),
                       createdAt: Date.now()
                     };
-                    setPlaylists(prev => [...prev, newPlaylist]);
+                    setPlaylists(prev => {
+                      const updated = [...prev, newPlaylist];
+                      db.playlists.add(newPlaylist);
+                      return updated;
+                    });
                     setSelectedPlaylistId(newPlaylist.id);
                     setNewPlaylistName("");
                     setShowCreatePlaylistModal(false);
@@ -869,6 +1136,106 @@ export default function App() {
                 </button>
               </div>
             </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Edit Song Modal */}
+      <AnimatePresence>
+        {songToEdit && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+             <motion.div 
+               initial={{ opacity: 0 }}
+               animate={{ opacity: 1 }}
+               exit={{ opacity: 0 }}
+               onClick={() => setSongToEdit(null)}
+               className="absolute inset-0 bg-black/80 backdrop-blur-md"
+             />
+             <motion.div 
+               initial={{ scale: 0.9, opacity: 0 }}
+               animate={{ scale: 1, opacity: 1 }}
+               exit={{ scale: 0.9, opacity: 0 }}
+               className="relative bg-[#1A1A1A] border border-white/10 rounded-3xl p-8 w-full max-w-md shadow-2xl"
+             >
+                <div className="flex justify-between items-center mb-6">
+                  <h3 className="text-2xl font-bold">Edit Track Details</h3>
+                  <button 
+                    onClick={handleMagicEnrich}
+                    disabled={isEnriching}
+                    className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-500 to-purple-600 rounded-full text-[10px] font-bold uppercase tracking-widest hover:scale-105 transition-all active:scale-95 disabled:opacity-50"
+                  >
+                    {isEnriching ? <Loader2 className="w-3 h-3 animate-spin"/> : <Sparkles className="w-3 h-3" />}
+                    <span>AI Enrich</span>
+                  </button>
+                  <button onClick={() => setSongToEdit(null)} className="p-2 hover:bg-white/5 rounded-full"><X className="w-5 h-5"/></button>
+                </div>
+                <div className="space-y-4 max-h-[60vh] overflow-y-auto px-1">
+                   <div>
+                     <label className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-2 block">Track Name</label>
+                     <div className="relative">
+                        <input 
+                          type="text"
+                          value={songToEdit.name}
+                          onChange={(e) => setSongToEdit({...songToEdit, name: e.target.value})}
+                          className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 focus:border-purple-500 outline-none"
+                        />
+                        <Wand2 className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 opacity-20" />
+                     </div>
+                   </div>
+                   <div className="grid grid-cols-2 gap-4">
+                     <div>
+                       <label className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-2 block">Artist</label>
+                       <input 
+                         type="text"
+                         value={songToEdit.artist}
+                         onChange={(e) => setSongToEdit({...songToEdit, artist: e.target.value})}
+                         className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 focus:border-purple-500 outline-none"
+                       />
+                     </div>
+                     <div>
+                       <label className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-2 block">Album</label>
+                       <input 
+                         type="text"
+                         value={songToEdit.album || ""}
+                         onChange={(e) => setSongToEdit({...songToEdit, album: e.target.value})}
+                         className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 focus:border-purple-500 outline-none"
+                       />
+                     </div>
+                   </div>
+                   <div>
+                     <label className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-2 block">Lyrics</label>
+                     <textarea 
+                       value={songToEdit.lyrics || ""}
+                       onChange={(e) => setSongToEdit({...songToEdit, lyrics: e.target.value})}
+                       placeholder="AI will fetch lyrics if you use the Enrich button above..."
+                       className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 focus:border-purple-500 outline-none h-32 resize-none text-sm leading-relaxed"
+                     />
+                   </div>
+                   <div>
+                     <label className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-2 block">Cover Art Preview</label>
+                     <div className="w-full aspect-video rounded-xl overflow-hidden relative border border-white/10">
+                        <div className="absolute inset-0" style={{ background: songToEdit.coverArt }} />
+                        <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                           <p className="text-[10px] font-bold uppercase tracking-widest opacity-60">Cover Generated</p>
+                        </div>
+                     </div>
+                   </div>
+                </div>
+                <div className="flex gap-4 mt-8">
+                   <button 
+                     onClick={() => setSongToEdit(null)}
+                     className="flex-1 py-3 rounded-full font-bold bg-white/5 hover:bg-white/10 transition-colors"
+                   >
+                     Cancel
+                   </button>
+                   <button 
+                     onClick={() => songToEdit && updateSong(songToEdit)}
+                     className="flex-1 py-3 rounded-full font-bold bg-[#1DB954] hover:bg-[#1ed760] text-black transition-colors"
+                   >
+                     Save Changes
+                   </button>
+                </div>
+             </motion.div>
           </div>
         )}
       </AnimatePresence>
@@ -900,10 +1267,10 @@ export default function App() {
                     key={playlist.id}
                     onClick={() => {
                       if (!playlist.songIds.includes(songToAddToPlaylist.id)) {
+                        const updatedPlaylist = { ...playlist, songIds: [...playlist.songIds, songToAddToPlaylist.id] };
+                        db.playlists.put(updatedPlaylist);
                         setPlaylists(prev => prev.map(p => 
-                          p.id === playlist.id 
-                            ? { ...p, songIds: [...p.songIds, songToAddToPlaylist.id] }
-                            : p
+                          p.id === playlist.id ? updatedPlaylist : p
                         ));
                       }
                       setSongToAddToPlaylist(null);

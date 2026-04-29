@@ -119,15 +119,25 @@ export function useAudioPlayer(songs: Song[]) {
 
   useEffect(() => {
     if (audioRef.current && currentSong && !currentSong.youtubeId) {
-      audioRef.current.src = currentSong.fileUrl;
-      if (isPlaying) {
-        audioRef.current.play().catch(console.error);
+      if (currentSong.fileUrl && audioRef.current.src !== currentSong.fileUrl) {
+        audioRef.current.src = currentSong.fileUrl;
+        audioRef.current.load();
+      } else if (!currentSong.fileUrl) {
+        audioRef.current.removeAttribute('src');
+        audioRef.current.load();
+      }
+
+      if (isPlaying && currentSong.fileUrl) {
+        audioRef.current.play().catch((err) => {
+          if (err.name !== 'AbortError') console.error("Playback failed", err);
+        });
       }
     } else if (audioRef.current && currentSong?.youtubeId) {
        audioRef.current.pause();
-       audioRef.current.src = '';
+       audioRef.current.removeAttribute('src');
+       audioRef.current.load();
     }
-  }, [currentSong]);
+  }, [currentSong, isPlaying]);
 
   useEffect(() => {
     if (audioRef.current) {

@@ -351,6 +351,7 @@ async function startServer() {
             name,
             artist,
             album: albumName,
+            duration: track.duration_ms ? Math.floor(track.duration_ms / 1000) : 0,
             image: coverArt,
             youtubeId: videoId,
             fileUrl: track.preview_url || ""
