@@ -40,334 +40,359 @@ async function startServer() {
     const { playlistUrl } = req.body;
 
     try {
-      // Flexible ID extraction
-      const playlistIdMatch = playlistUrl.match(/playlist\/([a-zA-Z0-9]+)/) || playlistUrl.match(/[:/][pP]laylist[:/]([a-zA-Z0-9]+)/);
-      if (!playlistIdMatch) {
-        return res.status(400).json({ error: "Invalid Spotify playlist URL. Please paste the full link." });
-      }
-      const playlistId = playlistIdMatch[1];
-
-      const userAgents = [
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
-        'Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)',
-        'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
-        'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
-      ];
+      let targetUrl = playlistUrl;
       
-      async function fetchWithUA(url: string, ua: string) {
-        return axios.get(url, {
-          headers: {
-            'User-Agent': ua,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://open.spotify.com/',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
-            'Upgrade-Insecure-Requests': '1'
-          },
-          timeout: 20000,
-          validateStatus: () => true
-        });
+      // 1. Follow redirects for spotify.link short URLs or others
+      if (playlistUrl.includes('spotify.link') || playlistUrl.includes('link.spotify.com')) {
+        try {
+          const redirectRes = await axios.get(playlistUrl, { 
+            maxRedirects: 5,
+            headers: { 'User-Agent': 'Mozilla/5.0' } 
+          });
+          targetUrl = redirectRes.request.res.responseUrl || playlistUrl;
+        } catch (e) {
+          console.warn("Redirect follow failed, continuing with original URL");
+        }
       }
+
+      // 2. Flexible ID extraction (Playlists, Albums, Tracks)
+      const idMatch = targetUrl.match(/(playlist|album|track)[\/:][a-zA-Z0-9]+(?:\/|:)?([a-zA-Z0-9]+)/i) || 
+                      targetUrl.match(/(playlist|album|track)\/([a-zA-Z0-9]+)/i) ||
+                      targetUrl.match(/[:/](playlist|album|track)[:/]([a-zA-Z0-9]+)/i);
+
+      if (!idMatch) {
+        return res.status(400).json({ error: "Invalid Spotify URL. Please paste a valid Playlist, Album, or Track link." });
+      }
+      
+      const type = idMatch[1].toLowerCase();
+      const spotifyId = idMatch[2];
+      console.log(`Syncing ${type}: ${spotifyId}`);
+
+      // ... existing sync logic ...
+
+      const axiosConfig = {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+          'Sec-Ch-Ua-Mobile': '?0',
+          'Sec-Ch-Ua-Platform': '"macOS"',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Upgrade-Insecure-Requests': '1'
+        },
+        timeout: 10000,
+        maxRedirects: 10
+      };
 
       let rawData: any = null;
       let usedHtml: string = "";
 
-      // Try multiple User-Agents and Scraper Strategies
-      for (const ua of userAgents) {
+      const urlsToTry = [
+        `https://open.spotify.com/embed/${type}/${spotifyId}`,
+        `https://open.spotify.com/${type}/${spotifyId}`
+      ];
+
+      for (const url of urlsToTry) {
         if (rawData) break;
+        try {
+          const response = await axios.get(url, axiosConfig);
+          const html = response.data;
+          if (!html || typeof html !== 'string') continue;
+          usedHtml = html;
 
-        const urlsToTry = [
-          `https://open.spotify.com/playlist/${playlistId}`,
-          `https://open.spotify.com/embed/playlist/${playlistId}`
-        ];
-
-        for (const url of urlsToTry) {
-           try {
-              const response = await fetchWithUA(url, ua);
-              const html = response.data;
-              if (!html) continue;
-              usedHtml = html;
-
-              // Pattern 1: JSON scripts by ID (initial-state, resource, __NEXT_DATA__)
-              const jsonIds = ['initial-state', 'resource', '__NEXT_DATA__'];
-              for (const id of jsonIds) {
-                const match = html.match(new RegExp(`<script[^>]*id="${id}"[^>]*>([\\s\\S]*?)<\\/script>`));
-                if (match) {
-                  const content = match[1].trim();
-                  try {
-                    // Try direct JSON
-                    let parsed = JSON.parse(content);
-                    
-                    // If it's a string (wrapped JSON), parse again
-                    if (typeof parsed === 'string') {
-                      try { parsed = JSON.parse(parsed); } catch(e) {}
-                    }
-
-                    if (parsed.name || parsed.entities || parsed.tracks || parsed.props) {
-                      rawData = parsed;
-                      console.log(`Found rawData in #${id}`);
-                      break;
-                    }
-                  } catch (e) {
-                    // Try Base64
-                    try {
-                      const decoded = Buffer.from(content, 'base64').toString();
-                      const parsed = JSON.parse(decoded);
-                      if (parsed.name || parsed.entities || parsed.tracks || parsed.props) {
-                        rawData = parsed;
-                        console.log(`Found rawData in #${id} (Base64)`);
-                        break;
-                      }
-                    } catch (err) {}
-                  }
+          // Pattern 1: JSON-LD (Search Engine optimized data)
+          const ldMatches = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)];
+          for (const ldMatch of ldMatches) {
+            try {
+              const ld = JSON.parse(ldMatch[1]);
+              const type = ld['@type'];
+              if (type === 'MusicPlaylist' || type === 'MusicAlbum' || type === 'MusicRecording') {
+                if (type === 'MusicRecording') {
+                  rawData = { name: ld.name, tracks: { items: [ld] }, images: [{ url: ld.image || "" }] };
+                } else {
+                  const items = ld.track || ld.itemListElement || [];
+                  rawData = {
+                    name: ld.name,
+                    images: ld.image ? [{ url: ld.image }] : [],
+                    tracks: { items: Array.isArray(items) ? items.map((it: any) => ({ track: it.item || it })) : [] }
+                  };
+                }
+                if (rawData.tracks?.items?.length > 0) {
+                  console.log(`Extracted via JSON-LD (${type})`);
+                  break;
                 }
               }
+            } catch(e) {}
+          }
+          if (rawData) break;
 
-              if (rawData) break;
+          // Detect Bot Challenges
+          if (html.includes("Checking your browser") || html.includes("Just a moment") || html.includes("challenge-running")) {
+            console.warn("Bot challenge detected on Spotify fetch.");
+            continue;
+          }
 
-              // Pattern 3: Embed-specific track list regex
-              if (url.includes('/embed/')) {
-                 const embedTracks = [...html.matchAll(/{"track":{"name":"([^"]+)"[^{}]*,"uri":"spotify:track:([a-zA-Z0-9]+)"[^{}]*,"artists":\[{"name":"([^"]+)"/g)];
-                 if (embedTracks.length > 0) {
-                    rawData = {
-                      name: html.match(/<title>([^<]+)<\/title>/)?.[1] || "Imported Playlist",
-                      tracks: {
-                        items: embedTracks.map(m => ({
-                          track: {
-                            id: m[2],
-                            name: m[1],
-                            artists: [{ name: m[3] }]
-                          }
-                        }))
-                      }
-                    };
-                    console.log(`Found ${embedTracks.length} tracks via Embed Regex`);
+          // Pattern 2: JSON scripts by ID
+          const jsonIds = ['initial-state', 'resource', '__NEXT_DATA__', 'session', 'pwa-data', 'spotify-config'];
+          for (const id of jsonIds) {
+            const match = html.match(new RegExp(`<script[^>]*id="${id}"[^>]*>([\\s\\S]*?)<\\/script>`));
+            if (match) {
+              const content = match[1].trim();
+              try {
+                const parsed = JSON.parse(content);
+                if (isValidData(parsed)) {
+                  rawData = parsed;
+                  console.log(`Found rawData in #${id}`);
+                  break;
+                }
+              } catch (e) {
+                try {
+                  const decoded = Buffer.from(content, 'base64').toString();
+                  const parsed = JSON.parse(decoded);
+                  if (isValidData(parsed)) {
+                    rawData = parsed;
+                    console.log(`Found rawData in #${id} (Base64)`);
                     break;
-                 }
+                  }
+                } catch (err) {}
               }
+            }
+          }
 
-              // Pattern 4: Search for ANY script with playlist/track entities
-              const scripts = html.match(/<script[^>]*>([\s\S]*?)<\/script>/g) || [];
-              for (const script of scripts) {
-                const innerMatch = script.match(/>([\s\S]*?)<\/script>/);
-                const inner = innerMatch ? innerMatch[1].trim() : "";
-                if (inner.includes('playlist') && (inner.includes('track') || inner.includes('items'))) {
-                  try {
-                    if (inner.includes('{')) {
-                      const startIdx = inner.indexOf('{');
-                      const endIdx = inner.lastIndexOf('}');
-                      if (startIdx !== -1 && endIdx !== -1) {
-                        const jsonStr = inner.substring(startIdx, endIdx + 1);
-                        const json = JSON.parse(jsonStr);
-                        if (json.name || json.entities || (json.tracks && json.tracks.items) || json.props) {
-                          rawData = json;
-                          console.log(`Found rawData in arbitrary script tag`);
-                          break;
-                        }
-                      }
-                    }
-                  } catch (e) {}
-                }
-              }
+          if (rawData) break;
 
-              if (rawData) break;
-           } catch (e) {
-             console.warn(`Fetch with UA failed for ${url}`);
-           }
+          // Pattern 3: Embed Tracks Object
+          const tracksMatch = html.match(/"tracks":\s*(\{[\s\S]*?"items":\s*\[[\s\S]*?\]\s*\})/);
+          if (tracksMatch) {
+            try {
+              const tracksObj = JSON.parse(tracksMatch[1]);
+              rawData = { tracks: tracksObj, name: html.match(/<title>([^<]+)<\/title>/)?.[1] || "Imported Items" };
+              console.log("Extracted tracks from embed JSON");
+              break;
+            } catch(e) {}
+          }
+        } catch (e: any) {
+          console.warn(`Fetch failed for ${url}: ${e.message}`);
         }
       }
 
-      // Final Strategy: Fallback to Meta + Regex extraction if JSON parsing is still missing
+      function isValidData(data: any): boolean {
+        if (!data) return false;
+        // Check for common Spotify data structures
+        return !!(data.name || data.entities || data.tracks || data.props || data.playlistData);
+      }
+
+      // Check if we still have nothing
       if (!rawData && usedHtml) {
-        console.log("JSON parsing failed, falling back to Regex extraction");
+        console.log("No structured JSON found, attempting regex extraction from metadata...");
         const ogTitle = usedHtml.match(/<meta[^>]*property="og:title"[^>]*content="([^"]+)"/)?.[1] ||
-                       usedHtml.match(/<meta[^>]*content="([^"]+)"[^>]*property="og:title"/)?.[1];
+                        usedHtml.match(/<meta[^>]*content="([^"]+)"[^>]*property="og:title"/)?.[1];
         const ogImage = usedHtml.match(/<meta[^>]*property="og:image"[^>]*content="([^"]+)"/)?.[1] ||
-                       usedHtml.match(/<meta[^>]*content="([^"]+)"[^>]*property="og:image"/)?.[1];
-        const ogDescription = usedHtml.match(/<meta[^>]*property="og:description"[^>]*content="([^"]+)"/)?.[1] ||
-                             usedHtml.match(/<meta[^>]*content="([^"]+)"[^>]*property="og:description"/)?.[1];
+                        usedHtml.match(/<meta[^>]*content="([^"]+)"[^>]*property="og:image"/)?.[1];
         
-        // Find track items in the HTML by looking for aria-labels (common pattern)
+        // Extract links
         const tracks = [];
-        
-        // Strategy A: Aria Labels
-        const trackAriaMatches = [...usedHtml.matchAll(/aria-label="([^"]+) by ([^"]+)"/g)];
-        for (const match of trackAriaMatches) {
-          let [, name, artist] = match;
-          if (name.startsWith('Track: ')) name = name.replace('Track: ', '');
-          
+        const trackLinkMatches = [...usedHtml.matchAll(/href="\/track\/([a-zA-Z0-9]+)"[^>]*>([^<]+)/g)];
+        for (const match of trackLinkMatches) {
+          const [, id, name] = match;
+          if (["Home", "Search", "Spotify"].includes(name.trim())) continue;
           tracks.push({
             track: {
-              id: `html-aria-${Math.random().toString(36).substr(2, 9)}`,
-              name,
-              artists: [{ name: artist }],
+              id,
+              name: name.trim(),
+              artists: [{ name: "Unknown Artist" }],
               album: { name: ogTitle || "Unknown Album", images: [{ url: ogImage }] }
             }
           });
         }
 
-        // Strategy B: OgDescription Parsing (Spotify often list tracks here like "Song 1, Song 2, ...")
-        if (tracks.length === 0 && ogDescription) {
-          const descTracks = ogDescription.split(',').map(s => s.trim()).filter(s => s.length > 2);
-          if (descTracks.length > 1) {
-             for (const t of descTracks) {
-               tracks.push({
-                 track: {
-                   id: `html-desc-${Math.random().toString(36).substr(2, 9)}`,
-                   name: t,
-                   artists: [{ name: "Artist" }],
-                   album: { name: ogTitle || "Unknown Album", images: [{ url: ogImage }] }
-                 }
-               });
-             }
-          }
-        }
-
-        // Strategy C: Link Matches
-        if (tracks.length === 0) {
-          const trackLinkMatches = [...usedHtml.matchAll(/href="\/track\/([a-zA-Z0-9]+)"[^>]*>([^<]+)/g)];
-          for (const match of trackLinkMatches) {
-            const [, id, name] = match;
-            if (name === "Home" || name === "Search" || name.includes("Spotify")) continue;
-            tracks.push({
-              track: {
-                id: `html-link-${id}`,
-                name: name.trim(),
-                artists: [{ name: "Unknown Artist" }],
-                album: { name: ogTitle || "Unknown Album", images: [{ url: ogImage }] }
-              }
-            });
-          }
-        }
-
-        if (tracks.length > 0 && ogTitle) {
+        if (tracks.length > 0) {
           rawData = {
-            name: ogTitle,
-            images: [{ url: ogImage }],
+            name: ogTitle || "Imported Playlist",
+            images: ogImage ? [{ url: ogImage }] : [],
             tracks: { items: tracks }
           };
-          console.log(`Extracted ${tracks.length} tracks via Regex/Meta fallback`);
+          console.log(`Extracted ${tracks.length} tracks via Meta/Link fallback`);
         }
       }
 
       if (!rawData) {
-        const ogTitle = usedHtml.match(/<meta property="og:title" content="([^"]+)"/)?.[1];
-        if (ogTitle) {
-           return res.status(400).json({ 
-             error: `We found playlist "${ogTitle}", but Spotify is blocking access to the track list. Please try a different public playlist or ensure this one isn't a "Blend".`
-           });
-        }
-        return res.status(400).json({ error: "Could not read playlist data. Ensure it is a PUBLIC Spotify playlist and not a private Blend." });
+        return res.status(400).json({ error: "Could not read playlist. Please ensure it is PUBLIC and not a Blend." });
       }
 
-      let normalized: any = { name: "Imported Playlist", images: [], tracks: { items: [] } };
+      // Normalization: Find tracks in various possible JSON structures
+      function extractTracks(obj: any): any[] {
+        if (!obj || typeof obj !== 'object' || obj === null) return [];
+        
+        // 1. Single track handling
+        if (type === 'track') {
+          if (obj.name && (obj.artists || obj.byArtist)) return [obj];
+          if (obj.track && obj.track.name) return [obj.track];
+        }
 
-      // Multi-layered Normalization Strategy
-      function extractFromAnywhere(obj: any): any[] {
-        if (!obj || typeof obj !== 'object') return [];
-        
-        // Priority 1: Direct matches for known Spotify structures
-        if (obj.tracks?.items) return obj.tracks.items;
-        if (obj.playlistData?.tracks?.items) return obj.playlistData.tracks.items;
-        if (obj.pageProps?.playlistData?.tracks?.items) return obj.pageProps.playlistData.tracks.items;
-        if (obj.state?.playlist?.tracks?.items) return obj.state.playlist.tracks.items;
-        
-        // Priority 2: entities.items structure (Common in 'initial-state')
-        if (obj.entities?.items) {
-          const tracks = [];
-          for (const key in obj.entities.items) {
-            if (key.includes(':track:')) {
-              tracks.push({ track: obj.entities.items[key] });
+        // 2. Direct property matches
+        const directKeys = ['items', 'tracks', 'trackList', 'playlistData', 'albumData', 'entries', 'content'];
+        for (const key of directKeys) {
+          if (Array.isArray(obj[key])) {
+            const list = obj[key];
+            if (list.length > 0 && (list[0].track || list[0].name || list[0].id)) return list;
+          }
+        }
+
+        // 3. Deep recursive search for any array of objects that look like tracks
+        const seen = new WeakSet();
+        function deepSearch(current: any): any[] | null {
+          if (!current || typeof current !== 'object' || seen.has(current)) return null;
+          seen.add(current);
+
+          if (Array.isArray(current)) {
+            if (current.length > 0) {
+              const first = current[0];
+              if (first && typeof first === 'object') {
+                // Heuristic: objects with 'name' and 'artists' or a 'track' sub-object are likely tracks
+                if ((first.name && (first.artists || first.duration_ms)) || first.track) {
+                  return current;
+                }
+              }
             }
           }
-          if (tracks.length > 0) return tracks;
+
+          for (const key in current) {
+            if (['images', 'available_markets', 'external_urls', 'owner', 'preview_url', 'user', 'theme', 'config', 'session'].includes(key)) continue;
+            try {
+              const result = deepSearch(current[key]);
+              if (result) return result;
+            } catch(e) {}
+          }
+          return null;
         }
 
-        // Priority 3: Recursive search for anything that looks like an array of tracks
-        if (Array.isArray(obj)) {
-          if (obj.length > 0 && (obj[0].track || obj[0].name || obj[0].item?.data)) {
-            return obj;
-          }
-        }
+        const found = deepSearch(obj);
+        if (found) return found;
 
-        let tracks: any[] = [];
-        for (const key in obj) {
-          // Skip enormous metadata keys that aren't tracks
-          if (key === 'config' || key === 'session' || key === 'user') continue;
-          
-          if (typeof obj[key] === 'object' && obj[key] !== null) {
-            const found = extractFromAnywhere(obj[key]);
-            if (found.length > tracks.length) tracks = found;
-          }
-        }
-        return tracks;
+        // 4. Special Next.js structure
+        return obj.props?.pageProps?.playlistData?.tracks?.items || 
+               obj.props?.pageProps?.albumData?.tracks?.items || [];
       }
 
-      const foundTracks = extractFromAnywhere(rawData);
-      
-      const playlistName = rawData.name || rawData.playlistData?.name || rawData.props?.pageProps?.playlistData?.name || "Imported Playlist";
+      let tracksData = extractTracks(rawData);
+
+      // 6. Brute-force fallback: Multi-layer Regex the raw HTML
+      if (tracksData.length === 0 && usedHtml) {
+        console.log("JSON/Direct sync failed, trying intensive scrape...");
+        
+        const possiblePatterns = [
+           /{"track":{"name":"([^"]+)"[^{}]*,"uri":"spotify:track:([a-zA-Z0-9]+)"[^{}]*,"artists":\[{"name":"([^"]+)"/g,
+           /"name":"([^"]+)","uri":"spotify:track:([a-zA-Z0-9]+)","artists":\[{"name":"([^"]+)"/g,
+           /href="\/track\/([a-zA-Z0-9]+)"[^>]*>([^<]+)/g,
+           /"name":"([^"]+)","id":"([a-zA-Z0-9]+)","type":"track"/g,
+           /"name":"([^"]+)","id":"([a-zA-Z0-9]{22})"/g
+        ];
+
+        const allCapturedTracks = new Map();
+
+        for (const pattern of possiblePatterns) {
+           const matches = [...usedHtml.matchAll(pattern)];
+           for (const m of matches) {
+              const id = m[2] || m[1];
+              const name = m[1] || m[2];
+              if (id && name && !allCapturedTracks.has(id)) {
+                 allCapturedTracks.set(id, { track: { name, id, artists: [{ name: m[3] || "Various Artists" }] } });
+              }
+           }
+           if (allCapturedTracks.size > 5) break; 
+        }
+        
+        tracksData = Array.from(allCapturedTracks.values());
+        console.log(`Deep scrape found ${tracksData.length} potential tracks`);
+      }
+
+      // Meta Tag Special Handling for single tracks
+      if (tracksData.length === 0 && type === 'track' && usedHtml) {
+        const ogTitle = usedHtml.match(/<meta property="og:title" content="([^"]+)"/)?.[1];
+        const ogDesc = usedHtml.match(/<meta property="og:description" content="([^"]+)"/)?.[1];
+        if (ogTitle) {
+          tracksData = [{ track: { name: ogTitle, artists: [{ name: ogDesc?.split(' · ')[0] || "Unknown" }] } }];
+        }
+      }
+      const playlistName = rawData.name || rawData.playlistData?.name || rawData.props?.pageProps?.playlistData?.name || "Imported Collection";
       const rawImages = rawData.images || rawData.playlistData?.images || rawData.props?.pageProps?.playlistData?.images || [];
-      const playlistImage = Array.isArray(rawImages) ? (rawImages[0]?.url || rawImages[0]?.sources?.[0]?.url || "") : "";
-
-      normalized = {
-        name: playlistName,
-        images: Array.isArray(rawImages) ? rawImages : [],
-        tracks: { items: foundTracks }
-      };
-
-      const tracksData = normalized.tracks?.items || [];
-      console.log(`Final normalized track count: ${tracksData.length}`);
+      const playlistImage = Array.isArray(rawImages) ? (rawImages[0]?.url || "") : "";
 
       if (tracksData.length === 0) {
-        return res.status(400).json({ error: "Empty playlist or private data. Ensure it is a PUBLIC playlist." });
+        return res.status(400).json({ 
+          error: "No tracks found. This content might be private, empty, or currently restricted by Spotify's web player." 
+        });
       }
 
-      const enrichedTracks = await enrichTracks(tracksData.slice(0, 50), playlistImage);
-
-      async function enrichTracks(items: any[], defaultImg: string) {
-        const result = [];
-        for (const item of items) {
+      console.log(`Syncing ${tracksData.length} tracks from "${playlistName}"...`);
+      
+      // Limit to 50 tracks to keep it snappy
+      const itemsToEnrich = tracksData.slice(0, 50);
+      
+      const enrichedTracks = [];
+      const batchSize = 4; // Smaller batches to avoid rate limits
+      for (let i = 0; i < itemsToEnrich.length; i += batchSize) {
+        const batch = itemsToEnrich.slice(i, i + batchSize);
+        const batchResults = await Promise.all(batch.map(async (item) => {
           const track = item.track || item.item?.data || item;
-          if (!track || !track.name) continue;
+          if (!track || (!track.name && !item.name)) return null;
 
-          const name = track.name;
-          const artist = track.artists?.map((a: any) => a.name || a.profile?.name).join(", ") || 
-                         track.artists?.items?.map((a: any) => a.profile?.name || a.name).join(", ") || 
-                         "Unknown Artist";
-          const albumName = track.album?.name || track.albumOfTrack?.name || "Unknown Album";
-          const coverArt = track.album?.images?.[0]?.url || track.albumOfTrack?.coverArt?.sources?.[0]?.url || defaultImg;
+          const name = track.name || item.name;
+          const artist = track.artists?.map((a: any) => a.name || a.profile?.name).join(", ") || "Various Artists";
+          const albumName = track.album?.name || playlistName || "Unknown Album";
+          const coverArt = track.album?.images?.[0]?.url || playlistImage;
 
           let videoId = null;
           try {
-            await new Promise(r => setTimeout(r, 60));
-            const searchResults = await youtube.GetListByKeyword(`${name} ${artist} official audio`, false, 1);
-            videoId = searchResults.items[0]?.id;
-          } catch (e) {}
+            // "Different way" to fetch: try different search terms if first fails
+            const searchQueries = [
+              `${name} ${artist} audio`,
+              `${name} ${artist} official`,
+              `${name} music video`
+            ];
 
-          result.push({
-            id: track.id || `sp-${Math.random().toString(36).substr(2, 9)}`,
+            for (const query of searchQueries) {
+              try {
+                const searchResults = await youtube.GetListByKeyword(query, false, 1);
+                if (searchResults.items?.[0]?.id) {
+                  videoId = searchResults.items[0].id;
+                  break;
+                }
+              } catch(e) {}
+            }
+          } catch (e) {
+            console.error(`YouTube search failed for ${name}`);
+          }
+
+          return {
+            id: track.id || `sync-${Math.random().toString(36).substring(2, 11)}`,
             name,
             artist,
             album: albumName,
             duration: track.duration_ms ? Math.floor(track.duration_ms / 1000) : 0,
             image: coverArt,
             youtubeId: videoId,
-            fileUrl: track.preview_url || ""
-          });
-        }
-        return result;
+            fileUrl: ""
+          };
+        }));
+        enrichedTracks.push(...batchResults.filter(Boolean));
       }
 
       res.json({
         name: playlistName,
         coverArt: playlistImage,
-        tracks: enrichedTracks
+        tracks: enrichedTracks,
+        totalFound: tracksData.length,
+        importedCount: enrichedTracks.length
       });
     } catch (error: any) {
-      console.error("Scraping Global Error:", error.message);
-      res.status(500).json({ error: "Failed to sync. Please check the URL and ensure the playlist is Public." });
+      console.error("Spotify Sync Error:", error.message);
+      res.status(500).json({ error: error.message || "Failed to sync. Ensure the content is Public and try again." });
     }
   });
 

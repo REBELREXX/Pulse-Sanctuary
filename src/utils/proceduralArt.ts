@@ -25,6 +25,18 @@ export function generateProceduralArt(seed: string): string {
 }
 
 /**
+ * Returns a CSS background property value for a given art string.
+ * Detects if it's a data URL image or a CSS gradient.
+ */
+export function getCoverBackground(art: string | undefined): string {
+  if (!art) return 'rgba(255,255,255,0.05)';
+  if (art.startsWith('data:')) {
+    return `url(${art}) center/cover no-repeat`;
+  }
+  return art;
+}
+
+/**
  * Generates a simplified CSS color for small dots or accents.
  */
 export function getAccentColor(seed: string): string {
